@@ -55,6 +55,9 @@ struct Thermo_T
 {
   float set_point_c;
   float t1;
+  float t2;
+  float tExt;
+  int presence;
 }Thermo;
 
 
@@ -63,10 +66,22 @@ void SetCursor(int x, int y)
     tft.setCursor(CURSOR_X0+x, CURSOR_Y0 + y, 2);
 }
 
+void DrawRect(unsigned short  x, unsigned short  y, unsigned short  w, unsigned short l, unsigned short colo)
+{
+     tft.fillRect(x + CURSOR_X0, y + CURSOR_Y0, w, l, colo);
+}
+
 unsigned long drawTime = 0;
 
-void setup(void) {
+void setup(void) 
+{
   Serial.begin(115200);
+
+  pinMode(TFT_BL, OUTPUT);
+  ledcSetup(0, 5000, 8); // 0-15, 5000, 8
+  ledcAttachPin(TFT_BL, 0); // TFT_BL, 0 - 15
+  ledcWrite(0, 100); // 0-15, 0-255 (with 8 bit resolution); 0=totally dark;255=totally shiny
+  
   tft.begin();
   tft.setRotation(1);
   
@@ -77,6 +92,9 @@ void setup(void) {
 
    //init var
    Thermo.t1 = 18;
+   Thermo.t2 = 18;
+   Thermo.tExt = 18;
+   Thermo.presence = 4; //presence unknown
    Thermo.set_point_c = 17;
 
 }
@@ -98,9 +116,15 @@ WiFiClient espClient;
 PubSubClient client(espClient);
 //if (strcmp(topic, "esp32/relay1") == 0) {
 
-
-const char* topic_t1 = "termo/t1";
+#define MAX_TOPICS  5
+const char* topic_t1 = "termo/t1"; //salotto
+const char* topic_t2 = "termo/t2"; //soffitta
+const char* topic_tExt = "termo/tExt"; //esterno
 const char* topic_setpoint = "termo/set";
+const char* topic_presence= "termo/presence"; //topic di presenza 1=salotto 2=soffitta 3=tutto 4=nessuna
+
+
+const char* topics[MAX_TOPICS] = {topic_t1,topic_t2,topic_tExt,topic_setpoint,topic_presence}; 
 
 
 
@@ -108,15 +132,41 @@ static bool state = false;
 
 
 
-const byte red = 23;
-const byte green = 50;
-const byte blue = 113;
+const byte red = 38;
+const byte green = 60;
+const byte blue = 117;
 
 byte color_blue[3] = {red,green,blue};
 byte color_orange[3] = {(byte)232,(byte)157,(byte)19};
 byte* color = (byte *)&color_blue;
 
+///////////////////////////timers//////////////////////////////
+static int timer = 0;
+static int mils = 0;
 
+void TimerCharge(int seconds)
+{
+  static int timer = seconds*1000;
+  static int mils = millis();
+}
+
+bool TimerCheck()
+{
+  int decs = millis()-mils;
+  timer-= decs;
+
+  if(timer == 0)
+  {
+    return true;
+  }
+  else
+  {
+    return false;
+  }
+}
+///////////////////////////////////////////////////////////////////
+
+////////////////mqttcallback/////////////////////////////////////////////////////////
 void callback(char* topic, byte* payload, unsigned int length) 
 {
   Serial.print("Message arrived [");
@@ -132,40 +182,165 @@ void callback(char* topic, byte* payload, unsigned int length)
   ////////////////////////EXPERIMENTAL GUI//////////
   if (strcmp(topic, topic_t1) == 0) 
   {
-    SetCursor(0,30);
     Thermo.t1 = svalue.toFloat();
+  }
+  else if(strcmp(topic, topic_t2) == 0) 
+  {
+     Thermo.t2 = svalue.toFloat();
+  }
+  else if(strcmp(topic, topic_tExt) == 0) 
+  {
+     Thermo.tExt = svalue.toFloat();
+  }
+  else if(strcmp(topic, topic_presence) == 0) 
+  {
+     Thermo.presence = svalue.toInt();
+  }
+  else if(strcmp(topic, topic_setpoint) == 0) 
+  {
+     Thermo.set_point_c = svalue.toFloat();
   }
   else
   {
      SetCursor(0,60);
      Thermo.set_point_c = svalue.toFloat();
   }
-  tft.print(topic);
-  tft.print(" ");
+  //tft.print(topic);
+  //tft.print(" ");
   //for (int i=0;i<length;i++) {
    // tft.print((char)payload[i]);
   //}
   
-  tft.print(svalue);
+  //tft.print(svalue);
   ////////////////////////////////////////////////////
 
   
-  if(Thermo.set_point_c > Thermo.t1)
+  if(true == Thermo_Logic())
   {
     digitalWrite(RELEPIN,RISCA_ON);
-    tft.fillRect(240, 50, 40, 40, TFT_ORANGE);
+    //DrawRect(240, 0, 40, 40, TFT_ORANGE);
     
   }
   else
   {
     digitalWrite(RELEPIN,RISCA_OFF);
-    tft.fillRect(240, 50, 40, 40, (color_blue[0],color_blue[1],color_blue[2]));
+    //DrawRect(240, 0, 40, 40, (color_blue[0] << 8  | color_blue[1] ) );
   }
   
- 
-  
+
+  GUI_DRAW();
+   
   
 }
+/////////////////////////////////////////////////////////////////////////////////////////////
+
+
+/////////////////////////////////////////////
+
+
+bool Thermo_Logic()
+{
+  float  temp_to_use = 0;
+
+  if(Thermo.presence == 1)
+  {
+    temp_to_use = Thermo.t1; //saloto
+  }
+  else if (Thermo.presence == 2)
+  {
+    temp_to_use = Thermo.t2; //soffitta
+  }
+  else if (Thermo.presence == 3)
+  {
+    temp_to_use = (Thermo.t1 + Thermo.t2)/2;
+  }
+  else 
+  {
+    //uknown or all
+      temp_to_use = Thermo.t1; //salotto
+  }
+  
+
+
+  if(Thermo.set_point_c > temp_to_use)
+  {
+     return true;//return DrawRect(20, 60, 200, 10, TFT_ORANGE );
+  }
+  else
+  {
+    return false;
+  }
+}
+
+//////////////////////////////////////////
+
+
+/////////////////////gui draw////////////////////////////////////
+
+
+
+void GUI_DRAW()
+{
+  /**
+    Salotto Soffitta
+  _____
+
+       Setpoint number
+  
+  */
+
+  tft.setTextColor(TFT_WHITE,(color[0],color[1],color[2])); 
+
+  tft.fillScreen((color[0],color[1],color[2]));
+  SetCursor(0,0);
+  tft.setTextSize(3);
+  tft.print(  Thermo.t1 ,1  );
+  
+  SetCursor(120,0);
+  tft.setTextSize(3);
+  tft.print(   Thermo.t2  ,1 );
+
+  SetCursor(80,80);
+  tft.setTextSize(2);
+  tft.setTextColor(TFT_CYAN,(color[0],color[1],color[2])); 
+             
+
+  tft.print(   Thermo.set_point_c , 1   );
+
+  if(Thermo.presence == 4)
+  {
+    //unknown
+  }
+  else
+  {
+    if(Thermo.presence & 1) //salotto
+    {
+      DrawRect(0, 50, 80, 10, TFT_WHITE );
+    }
+    if(Thermo.presence & 2) //soffitta
+    {
+       DrawRect(120, 50, 80, 10, TFT_WHITE );
+    }
+  }
+
+  if(true == Thermo_Logic())
+  {
+    DrawRect(20, 60, 200, 10, TFT_ORANGE );
+  }
+
+  //MQTT STATUS...but if i am here it works...
+  DrawRect(0, 130, 40, 10, TFT_GREEN );
+
+
+}
+
+
+
+//////////////////////////////////////////////////////////////
+
+
+
+
 
 void loop()
 {
@@ -191,6 +366,14 @@ void loop()
         {
           Serial.println("connected");  
           task = 1;
+          //client.subscribe(topic_t1);
+          //client.subscribe(topic_setpoint);
+
+          for(int t = 0; t < MAX_TOPICS; t++)
+          {
+            client.subscribe(topics[t]);
+          }
+          
         } 
         else 
         {
@@ -199,11 +382,7 @@ void loop()
           delay(2000);
         }
       }
- 
-      client.subscribe(topic_t1);
-      client.subscribe(topic_setpoint);
       
-          
     break;
 
     case 1:
@@ -213,9 +392,12 @@ void loop()
         tft.setTextColor(TFT_WHITE,(color[0],color[1],color[2]));  
         tft.setTextSize(2);
         // We can now plot text on screen using the "print" class
-        tft.print("MQTT in ");
-        tft.println( WiFi.SSID());
-        tft.println( );
+        //tft.print("MQTT in ");
+        //tft.println( WiFi.SSID());
+        //tft.println( );
+  DrawRect(0, 130, 40, 10, TFT_GREEN );
+       // tft.fillRect(, y + CURSOR_Y0, w, l, colo);
+        TimerCharge(5);
         task = 3;
     break;
 
@@ -223,6 +405,25 @@ void loop()
 
     case 3:
       client.loop();
+      if(TimerCheck())
+      {
+        task = 4;
+      }
+      
+    break;
+
+    case 4: //check conn 
+      if(WiFi.status() != WL_CONNECTED)
+      {
+        task = 0;
+        DrawRect(0, 120, 40, 20, TFT_BLACK);
+
+      }
+      else
+      {
+        task = 3;
+      }
+      TimerCharge(5);
     break;
     
   }
