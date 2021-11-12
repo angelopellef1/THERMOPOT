@@ -49,9 +49,13 @@ Mettere manopola a 24 gradi
 #define RISCA_OFF HIGH
 
 #define RELEPIN  22
-
-
 #define TFT_WALL_BLUE 0x1947
+
+#define CS_WIFI   0x01
+#define CS_MQTT   0x02
+#define CS_NEWDATA  0x04
+
+
 
 // Use hardware SPI
 TFT_eSPI tft = TFT_eSPI(SCREEN_HEIGHT,SCREEN_WIDTH);
@@ -64,6 +68,7 @@ struct Thermo_T
   float t2;
   float tExt;
   int presence;
+  int connection_state;
 }Thermo;
 
 
@@ -100,7 +105,7 @@ void setup(void)
    Thermo.t1 = 18;
    Thermo.t2 = 18;
    Thermo.tExt = 18;
-   Thermo.presence = 4; //presence unknown
+   Thermo.presence = 2; //presence unknown
    Thermo.set_point_c = 17;
 
 }
@@ -113,7 +118,7 @@ int x,y,retries = 0;
 
 const char* ssid = "Pifi";
 const char* password =  "fastwebwifiangelopelle9cw";
-const char* mqttServer = "192.168.0.121";//"m11.cloudmqtt.com";
+const char* mqttServer = "192.168.0.112";//"m11.cloudmqtt.com";
 const int mqttPort = 1883;
 const char* mqttUser = "mqtt_user";
 const char* mqttPassword = "mqtt_user";
@@ -132,7 +137,7 @@ const char* topic_presence= "termo/presence"; //topic di presenza 1=salotto 2=so
 
 const char* topics[MAX_TOPICS] = {topic_t1,topic_t2,topic_tExt,topic_setpoint,topic_presence}; 
 
-
+const char* topic_rele = "termo/rele";
 
 static bool state = false;
 
@@ -232,28 +237,23 @@ void callback(char* topic, byte* payload, unsigned int length)
      SetCursor(0,60);
      Thermo.set_point_c = svalue.toFloat();
   }
-  //tft.print(topic);
-  //tft.print(" ");
-  //for (int i=0;i<length;i++) {
-   // tft.print((char)payload[i]);
-  //}
-  
-  //tft.print(svalue);
-  ////////////////////////////////////////////////////
 
   
   if(true == Thermo_Logic())
   {
     digitalWrite(RELEPIN,RISCA_ON);
+    client.publish(topic_rele,"1");
+      
     //DrawRect(240, 0, 40, 40, TFT_ORANGE);
     
   }
   else
   {
     digitalWrite(RELEPIN,RISCA_OFF);
+    client.publish(topic_rele,"0");
     //DrawRect(240, 0, 40, 40, (color_blue[0] << 8  | color_blue[1] ) );
   }
-  
+  Thermo.connection_state |= CS_NEWDATA;
 
   GUI_DRAW(false);
    
@@ -284,7 +284,7 @@ bool Thermo_Logic()
   else 
   {
     //uknown or all
-      temp_to_use = Thermo.t1; //salotto
+      temp_to_use = Thermo.t2; //soffitta
   }
   
 
@@ -342,7 +342,7 @@ void GUI_DRAW(bool info)
   }
 
   SetCursor(80,80);
-  tft.setTextSize(2);
+  tft.setTextSize(3);
   tft.setTextColor(TFT_CYAN,TFT_WALL_BLUE); 
   tft.print(   Thermo.set_point_c , 1   );
 
@@ -358,7 +358,7 @@ void GUI_DRAW(bool info)
     }
     if(Thermo.presence & 2) //soffitta
     {
-       DrawRect(120, 50, 80, 5, TFT_WHITE );
+       DrawRect(140, 50, 80, 5, TFT_WHITE );
     }
   }
 
@@ -368,7 +368,16 @@ void GUI_DRAW(bool info)
   }
 
   //MQTT STATUS...but if i am here it works...
-  DrawRect(0, 130, 40, 10, TFT_GREEN );
+  //DrawRect(0, 120, 40, 20, TFT_GREEN);
+
+   if(Thermo.connection_state & CS_WIFI) //WIFI ON
+    {
+      DrawRect(3, 128, 10, 10, TFT_WHITE );
+    }
+    if(Thermo.connection_state & CS_MQTT) //soffitta
+    {
+       DrawRect(16, 128, 10, 10, TFT_WHITE );
+    }
 
 
 }
@@ -378,8 +387,12 @@ void GUI_DRAW(bool info)
 //////////////////////////////////////////////////////////////
 
 
-#define INIT_CON             0
-#define TE_SCREEN_INIT_DRAW 1
+#define INIT_CON              0
+#define INIT_MQTT             1
+#define TE_SCREEN_INIT_DRAW   2
+#define IDLE_LOOP             3
+#define DISCONNECT            4
+
 
 
 void loop()
@@ -387,25 +400,31 @@ void loop()
   switch(task)
   {
     case INIT_CON :
-       WiFi.begin(ssid, password);
- 
+      WiFi.begin(ssid, password);
       while (WiFi.status() != WL_CONNECTED)
       {
+        Thermo.connection_state &= ~CS_WIFI;
         delay(500);
         Serial.println("Connecting to WiFi..");
       }
       Serial.println("Connected to the WiFi network");
- 
+      Thermo.connection_state |= CS_WIFI;
+      task = INIT_MQTT;
+    break;
+
+    case INIT_MQTT:
       client.setServer(mqttServer, mqttPort);
       client.setCallback(callback);
- 
+
       while (!client.connected()) 
       {
+        Thermo.connection_state &= ~CS_MQTT;
+        delay(2000);
         Serial.println("Connecting to MQTT...");
         if (client.connect("ESP32Client", mqttUser, mqttPassword )) 
         {
           Serial.println("connected");  
-          task = TE_SCREEN_INIT_DRAW;
+          
           //client.subscribe(topic_t1);
           //client.subscribe(topic_setpoint);
 
@@ -413,7 +432,9 @@ void loop()
           {
             client.subscribe(topics[t]);
           }
-          
+          Thermo.connection_state |= CS_MQTT;
+          task = TE_SCREEN_INIT_DRAW;
+          break;
         } 
         else 
         {
@@ -422,31 +443,30 @@ void loop()
           delay(2000);
         }
       }
-      
     break;
+
 
     case TE_SCREEN_INIT_DRAW:
         tft.fillScreen(TFT_WALL_BLUE);
         SetCursor(0,0);
-        // Set the font colour to be white with a black background, set text size multiplier to 1
         tft.setTextSize(2);
-        // We can now plot text on screen using the "print" class
-        //tft.print("MQTT in ");
-        //tft.println( WiFi.SSID());
-        //tft.println( );
-  DrawRect(0, 130, 40, 10, TFT_GREEN );
-       // tft.fillRect(, y + CURSOR_Y0, w, l, colo);
-        TimerCharge(5);
-         TimerGUICharge(4);
-        task = 3;
+        
+        TimerCharge(120);
+        TimerGUICharge(4);
+        Thermo.presence = 2;
+        client.publish(topic_presence,"2");
+        task = IDLE_LOOP;
     break;
 
    
 
-    case 3:
+    case IDLE_LOOP:
       client.loop();
+      //periodic GUI update
       if(true == TimerGUICheck())
       {
+        Thermo.connection_state &= ~CS_NEWDATA;
+        Serial.println("G");
          if(toggle_info == true)
          {
            GUI_DRAW(true);
@@ -461,24 +481,22 @@ void loop()
          }
       }
       
-      if(true == TimerCheck())
+      if(true == TimerCheck()) //
       {
-        task = 4;
+        TimerCharge(120);
+        GUI_DRAW(false);
+       
+        Serial.println("C");
+        task = DISCONNECT;
       }
     break;
 
-    case 4: //check conn 
-      if(WiFi.status() != WL_CONNECTED)
-      {
-        task = INIT_CON;
-        DrawRect(0, 120, 40, 20, TFT_BLACK);
-
-      }
-      else
-      {
-        task = 3;
-      }
-      TimerCharge(5);
+    case DISCONNECT: //check mqtt
+      client.disconnect();
+      Thermo.connection_state &= ~CS_MQTT;
+      GUI_DRAW(false);
+      delay(1000);
+      task = INIT_CON;
     break;
     
   }
